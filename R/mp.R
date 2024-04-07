@@ -1,4 +1,3 @@
-# mp.R - DESC
 # mse/R/mp.R
 
 # Copyright European Union, 2018
@@ -263,7 +262,7 @@ mp <- function(om, oem=NULL, iem=NULL, control=ctrl, ctrl=control, args,
 
   # --- RETURN
   res <- new("FLmse", om=om, args=args, oem=oem, control=ctrl,
-    tracking = tracking)
+    tracking = FLQuants(tracking))
   
   return(res)
 }
@@ -297,6 +296,8 @@ setMethod("goFish", signature(om="FLom"),
 
   # COPY ctrl
   ctrl0 <- ctrl
+
+  tracking <- tracking[[1]]
   
   p <- progressor(along=vy, offset=0L)
 
@@ -460,7 +461,7 @@ setMethod("goFish", signature(om="FLom"),
           message("Call to hcr method failed, check inputs")
           print(e)
         })
-      
+
       ctrl <- out.hcr$ctrl
       tracking <- out.hcr$tracking
     } else {
@@ -576,7 +577,7 @@ setMethod("goFish", signature(om="FLom"),
     om <- out$om
 
     # final control
-    track(tracking, "fwd", mys) <- ctrl[1,]
+    track(tracking, "fwd", mys) <- ctrl
     
     # time (in minutes, per iter)   
     track(tracking, "time", ay) <- as.numeric(difftime(Sys.time(), stim,
@@ -587,15 +588,15 @@ setMethod("goFish", signature(om="FLom"),
     track(tracking, "pid", ay) <- id
 
     # OUTPUT summary to logfile
-    lapply(dys, function(x)
-      cat(id, x, c(iterMeans(tracking[[1]][, ac(x)])), "\n", sep="\t",
-        file=logfile, append=TRUE))
+    #lapply(dys, function(x)
+    #  cat(id, x, c(iterMeans(tracking[, ac(x)])), "\n", sep="\t",
+    #    file=logfile, append=TRUE))
     
     # REPORT progress
     p(message = sprintf("year: %s", i))
  
-    cat(id, paste0("[", ay, "]"), c(iterMeans(tracking[[1]][, ac(ay)])),
-      "\n", sep="\t", file=logfile, append=TRUE)
+    #cat(id, paste0("[", ay, "]"), c(iterMeans(tracking[[1]][, ac(ay)])),
+    #  "\n", sep="\t", file=logfile, append=TRUE)
 
     # CLEAR memory
     gc()
@@ -672,13 +673,13 @@ setMethod("goFish", signature(om="FLombf"),
     sqy <- args$sqy <- ac(seq(ay - nsqy - dlag + 1, dy))
     
     # TRACK om TODO GAP? TODO dimensionality
-    track(tracking, "F.om", ay) <- unitMeans(window(fbar(om),
+    track(tracking, "F.om", ay,  stock=args$stock) <- unitMeans(window(fbar(om),
       start=dy, end=dy))
-    track(tracking, "B.om", ay) <- unitSums(window(tsb(om),
+    track(tracking, "B.om", ay,  stock=args$stock) <- unitSums(window(tsb(om),
       start=dy, end=dy))
-    track(tracking, "SB.om", ay) <- unitSums(window(ssb(om),
+    track(tracking, "SB.om", ay,  stock=args$stock) <- unitSums(window(ssb(om),
       start=dy, end=dy))
-    track(tracking, "C.om", ay) <- unitSums(window(catch(om),
+    track(tracking, "C.om", ay,  stock=args$stock) <- unitSums(window(catch(om),
       start=dy, end=dy))
     
     # --- OEM: Observation Error Model
@@ -698,11 +699,14 @@ setMethod("goFish", signature(om="FLombf"),
       obs.oem <- do.call("mpDispatch", c(ctrl.oem, list(stk=stk, deviances=dev,
         observations=obs, tracking=FLQuants(tra))))
 
-      # TODO: PICK UP fbar range from observations
-      # range(obs.oem$stk, c("minfbar", "maxfbar")) <- 
-      #  range(obs$stk, c("minfbar", "maxfbar")) 
+      # PICK UP fbar range from observations
+      if(!is.null(obs$stk)) {
+        range(obs.oem$stk, c("minfbar", "maxfbar")) <- 
+          range(obs$stk, c("minfbar", "maxfbar"))
+      }
 
       return(obs.oem)
+
     }, stk=stk, obs=observations(oem)[names(stk)],
       dev=deviances(oem)[names(stk)], tra=tracking[names(stk)])
     
@@ -710,6 +714,7 @@ setMethod("goFish", signature(om="FLombf"),
     stk0 <- FLStocks(lapply(o.out, "[[", "stk"))
     idx0 <- lapply(o.out, "[[", "idx")
 
+    # ADD to observations(oem)
     observations(oem) <- lapply(o.out, "[[", "observations")
     
     # DEBUG
@@ -719,42 +724,53 @@ setMethod("goFish", signature(om="FLombf"),
     # --- est: Estimator of stock statistics
 
     if (!is.null(ctrl0$est)) {
-      ctrl.est <- args(ctrl0$est)
-      ctrl.est$method <- method(ctrl0$est)
-      ctrl.est$args <- args
-      ctrl.est$ioval <- list(iv=list(t1=flsval, t2=flival), 
-        ov=list(t1=flsval))
-      ctrl.est$step <- "est"
-      
-      out.assess <- Map(function(x, y, z)
-        do.call("mpDispatch", c(ctrl.est, list(stk=x, idx=y, tracking=z))),
-        x=stk0, y=idx0, z=tracking)
 
+      # COMMON elements
+      com <- list(args=args, step="est",
+        ioval=list(iv=list(t1=flsval, t2=flival),  ov=list(t1=flsval)))
+
+      # SINGLE or MULTIPLE 'est'
+      if(is(ctrl0$est, "mseCtrl")) {
+        # NAME as args$stock
+        ctrl.est <- list(c(com, args(ctrl0$est),
+          method=method(ctrl0$est)))
+      } else if(is(ctrl0$est, "list")) {
+        ctrl.est <- lapply(ctrl0$est[args$stock], function(e)
+          c(com, args(e), method=method(e)))
+      }
+
+      sti <- args$stock
+
+      # MAP over ctrl.est: ctrl, stk, idx, tracking
+      out.assess <- Map(function(ct, st, id, tr)
+        do.call("mpDispatch", c(ct, list(stk=st, idx=id, tracking=tr))),
+        ct=ctrl.est[sti], st=stk0[sti], id=idx0[sti], tr=tracking[sti])
+
+      # EXTRACT stock(s)
       stk0 <- FLStocks(lapply(out.assess, "[[", "stk"))
 
       # EXTRACT ind(icators) if returned
-      if(!is.null(out.assess[[1]]$ind)) {
-        ind <- lapply(out.assess, "[[", "ind")
-      } else {
-        ind <- lapply(setNames(nm=bns), function(x) FLQuants())
-      }
-      
+      ind <- lapply(setNames(nm=bns[sti]), function(x) FLQuants())
+      id <- unlist(lapply(out.assess, function(x) !is.null(x$ind)))
+      ind[id] <- lapply(out.assess[id], "[[", "ind")
+
       # TODO: PASS args generated at est to ctrl
-      if (!is.null(out.assess$args)) {
-        args(ctrl0$est)[names(out.assess$args)] <-
-          out.assess$args
-      }
-      tracking <- FLQuants(lapply(out.assess, "[[", "tracking"))
+      # if (!is.null(out.assess$args)) {
+      #   args(ctrl0$est)[names(out.assess$args)] <-
+      #     out.assess$args
+      # }
+      tracking[id] <- FLQuants(lapply(out.assess, "[[", "tracking"))
+
     }
 
     # TRACK est
-    track(tracking, "F.est", seq(ay, ay + frq - 1)) <- 
+    track(tracking, "F.est",seq(ay, ay + frq - 1),  stock=args$stock) <- 
       window(lapply(stk0, fbar), start=dy, end=dy + frq - 1)
-    track(tracking, "B.est", seq(ay, ay + frq - 1)) <- 
+    track(tracking, "B.est", seq(ay, ay + frq - 1),  stock=args$stock) <- 
       window(lapply(stk0, stock), start=dy, end=dy + frq - 1)
-    track(tracking, "SB.est", seq(ay, ay + frq - 1)) <- 
+    track(tracking, "SB.est", seq(ay, ay + frq - 1),  stock=args$stock) <- 
       window(lapply(stk0, ssb), start=dy, end=dy + frq - 1)
-    track(tracking, "C.est", seq(ay, ay + frq - 1)) <- 
+    track(tracking, "C.est", seq(ay, ay + frq - 1),  stock=args$stock) <- 
       lapply(window(lapply(stk0, catch), start=dy, end=dy + frq - 1),
         areaSums)
 
@@ -787,59 +803,81 @@ setMethod("goFish", signature(om="FLombf"),
     
     if (!is.null(ctrl0$hcr)){
 
-      ctrl.hcr <- args(ctrl0$hcr) 
-      ctrl.hcr$method <- method(ctrl0$hcr)
+      # COMMON elements
+      com <- list(args=args, step="hcr",
+        ioval=list(iv=list(t1=flsval), ov=list(t1=flfval)))
 
-      # SELECT stock for hcr
-      if(!is.null(args$stock)) {
-        ctrl.hcr$stk <- stk0[[args$stock]]
-        ctrl.hcr$ind <- ind[[args$stock]]
-      } else {
-      # TODO: ADD extra checks
-        ctrl.hcr$stk <- stk0
-        ctrl.hcr$ind <- ind
+      # SINGLE or MULTIPLE 'hcr'
+      if(is(ctrl0$hcr, "mseCtrl")) {
+        # NAME as args$stock
+        ctrl.hcr <- list(c(com, args(ctrl0$hcr),
+          method=method(ctrl0$hcr)))
+      } else if(is(ctrl0$hcr, "list")) {
+        ctrl.hcr <- lapply(ctrl0$hcr, function(x)
+          c(com, args(x), method=method(x)))
       }
+
+      # MAP over ctrl.hcr
+      out <- Map(function(ct, st, id, tr)
+        do.call("mpDispatch", c(ct, list(stk=st, ind=id, tracking=tr))),
+        ct=ctrl.hcr, st=stk0, id=ind, tr=tracking[sti])
+      
+      # ctrl
+      ctrls <- lapply(out, "[[", "ctrl")
 
       # TODO:
-
-      ctrl.hcr$args <- args
-      ctrl.hcr$tracking <- tracking
-      if(exists("hcrpars")) ctrl.hcr$hcrpars <- hcrpars
-      ctrl.hcr$ioval <- list(iv=list(t1=flsval), ov=list(t1=flfval))
-      ctrl.hcr$step <- "hcr"
-      
-      out <- do.call("mpDispatch", ctrl.hcr)
-      ctrl <- out$ctrl
+      # if(exists("hcrpars")) ctrl.hcr$hcrpars <- hcrpars
 
       # BUG: ASSIGN biol
-      if(all(is.na(ctrl$biol)))
-       ctrl$biol <- args$stock
-      
-      # COUNT targets with 'f' or 'fbar', need minAge, maxAge
-      fbis <- target(ctrl)[ctrl$quant %in% c("f", "fbar"),]
+      # if(all(is.na(ctrl$biol)))
+      #  ctrl$biol <- args$stock
 
-      # BUG: SET fbar ages if missing
-      if(nrow(fbis) > 0) {
+      # FIX fbar
+      # - ASSIGN bio
+      # - ADD minAge, maxAge if fbar
+
+      .fixCtrl <- function(ctrl, range, biol) {
         
-        # GET fbar ranges
-        frgs <- lapply(stk0, range, c("minfbar", "maxfbar"))
-        
-        # CHANGE on those missing
-        for(i in unique(fbis$biol)) {
-          fbis[fbis$biol == i, c("minAge", "maxAge")]  <- frgs[[i]]
-        }
-        # ASSIGN back into ctrl
-        target(ctrl)[ctrl$quant %in% c("f", "fbar"),] <- fbis
+        # GET fbar range
+        frgs <- range[c("minfbar", "maxfbar")]
+
+        # ID targets with 'f' or 'fbar'
+        fbis <- ctrl$quant %in% c("f", "fbar")
+
+        # ASSIGN ages into ctrl
+        target(ctrl)[fbis, c("minAge", "maxAge")] <- rep(frgs, each=sum(fbis))
+
+        # ASSIGN biol
+        ctrl$biol <- biol
+
+        return(ctrl)
       }
 
-     tracking <- out$tracking
+      ctrls <- Map(.fixCtrl, ctrl=ctrls, range=lapply(stk0, range),
+        biol=args$stock)
+
+      # MERGE ctrls
+      ctrl <- Reduce(merge, ctrls)
+
+      # EXTRACT tracking
+      tracking[sti] <- FLQuants(lapply(out, "[[", "tracking"))
+    
     } else {
-      # BUG: DROP getCtrl
-      ctrl <- getCtrl(yearMeans(fbar(stk0)[,sqy]), "f", ay + args$management_lag, it)
+
+      # TODO: DEFAULT hcr | STOP
+
+      stop("mpCtrl requires an 'hcr' element.")
+
     }
     
-    track(tracking, "hcr", mys) <- ctrl
-    
+    browser()
+    aa <- Map(function(tr, ct) {
+      track(tr, "hcr", mys) <- ct
+      return(tr)
+      }, tr=tracking, ct=ctrls) 
+
+    track(tracking, "hcr", mys) <- ctrls
+
     #----------------------------------------------------------
     # Implementation system
     #----------------------------------------------------------

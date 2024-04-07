@@ -140,7 +140,7 @@ hockeystick.hcr <- function(stk, ind, lim, trigger, target, min=0, drop=0,
     pre <- areaSums(unitSums(seasonSums(window(do.call(output, list(stk)),
       start=ay - man_lag, end=ay - man_lag))))
   else
-    pre <- c(tracking[[1]]["hcr", ac(ay)])
+    pre <- c(tracking["hcr", ac(ay)])
 
   # IF NA, set to previous value
   if(any(is.na(out))) {
